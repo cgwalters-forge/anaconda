@@ -16,8 +16,50 @@
 #
 import os
 import shutil
+from collections import deque
 
 from pyanaconda.core.configuration.anaconda import conf
+
+
+def resolve_mount_target(root, path):
+    """Resolve a mount path inside root, returning a target-system absolute path.
+
+    Absolute symlinks are relative to the deployment, not the installer.
+    Missing directories are allowed because mount preparation creates them.
+    Reject traversal above root and bound symlink expansion to Linux's limit.
+    This assumes the deployment is not modified concurrently.
+
+    :raise ValueError: if the path escapes root or traverses too many symlinks
+    """
+    if not path.startswith("/"):
+        raise ValueError("Mount target must be absolute: {}".format(path))
+
+    pending = deque(path.split("/"))
+    resolved = []
+    links = 0
+    while pending:
+        component = pending.popleft()
+        if component in ("", "."):
+            continue
+        if component == "..":
+            if not resolved:
+                raise ValueError("Mount target escapes deployment root: {}".format(path))
+            resolved.pop()
+            continue
+
+        candidate = os.path.join(root, *resolved, component)
+        if os.path.islink(candidate):
+            links += 1
+            if links > 40:
+                raise ValueError("Too many symlinks in mount target: {}".format(path))
+            target = os.readlink(candidate)
+            if target.startswith("/"):
+                resolved.clear()
+            pending.extendleft(reversed(target.split("/")))
+        else:
+            resolved.append(component)
+
+    return "/" + "/".join(resolved)
 
 
 def set_system_root(path):

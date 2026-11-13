@@ -1699,6 +1699,7 @@ class StorageTasksTestCase(unittest.TestCase):
     def test_write_configuration(self, patched_conf, dbus):
         """Test WriteConfigurationTask."""
         storage = Mock(devices=[],
+                       boot_device=None,
                        devicetree=Mock(_hidden=[]),
                        root_device=Mock(ancestors=[Mock(), Mock()])
                        )
@@ -1714,6 +1715,11 @@ class StorageTasksTestCase(unittest.TestCase):
             patched_conf.target.is_directory = False
             WriteConfigurationTask(storage, PAYLOAD_TYPE_DNF).run()
             assert os.path.exists("{}/etc".format(d))
+            storage.fsset.write.assert_called_once_with()
+
+            storage.fsset.write.reset_mock()
+            WriteConfigurationTask(storage, PAYLOAD_TYPE_RPM_OSTREE).run()
+            storage.fsset.write.assert_called_once_with(mount_target_root=d)
 
     @patch("pyanaconda.modules.storage.installation.conf")
     @patch("pyanaconda.modules.storage.installation.os.path.exists", return_value=False)

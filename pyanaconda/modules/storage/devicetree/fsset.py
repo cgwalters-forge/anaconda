@@ -40,6 +40,7 @@ from blivet.storage_log import log_exception_info
 from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.constants import EFIVARS_MOUNT_POINT
+from pyanaconda.core.path import resolve_mount_target
 from pyanaconda.modules.storage.platform import EFI, platform
 
 log = get_module_logger(__name__)
@@ -544,11 +545,11 @@ class FSSet:
                 if mountpoint == path:
                     return device
 
-    def write(self):
-        """Write out all config files based on the set of filesystems."""
+    def write(self, mount_target_root=None):
+        """Write config files, optionally resolving fstab targets inside a deployment."""
         sysroot = conf.target.system_root
         # /etc/fstab
-        fstab = self.fstab()
+        fstab = self.fstab(mount_target_root=mount_target_root)
         fstab.write(dest_file=os.path.normpath("%s/etc/fstab" % sysroot))
 
         # /etc/crypttab
@@ -621,7 +622,7 @@ class FSSet:
 
         return content
 
-    def fstab(self):
+    def fstab(self, mount_target_root=None):
         """ Create a FSTabManager object, fill it with current devices
             and return it as a result to be written
         """
@@ -675,6 +676,9 @@ class FSSet:
                             fstype,
                             device.path)  # legacy warning message # TODO change to e.msg?
                 continue
+
+            if mount_target_root is not None and device.format.mountable:
+                new_entry.file = resolve_mount_target(mount_target_root, new_entry.file)
 
             for netdev in netdevs:
                 if device.depends_on(netdev):

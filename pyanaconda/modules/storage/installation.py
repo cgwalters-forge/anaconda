@@ -289,7 +289,10 @@ class WriteConfigurationTask(Task):
         self._adjust_mount_options_for_rpm_ostree(storage, sysroot)
         self._exclude_root_from_fstab_for_rpm_ostree(storage)
 
-        storage.fsset.write()
+        if self._payload_type == PAYLOAD_TYPE_RPM_OSTREE:
+            storage.fsset.write(mount_target_root=sysroot)
+        else:
+            storage.fsset.write()
 
         self._write_lvm_devices_file(self._storage, sysroot)
 

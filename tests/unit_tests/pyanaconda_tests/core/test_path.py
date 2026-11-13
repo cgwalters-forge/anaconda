@@ -28,10 +28,31 @@ from pyanaconda.core.path import (
     join_paths,
     make_directories,
     open_with_perm,
+    resolve_mount_target,
     set_mode,
     set_system_root,
     touch,
 )
+
+
+@pytest.mark.parametrize("target", ["var/home", "/var/home", "alias"])
+def test_resolve_mount_target(tmp_path, target):
+    """Resolve relative, absolute and chained deployment links, including parents."""
+    (tmp_path / "home").symlink_to(target)
+    (tmp_path / "alias").symlink_to("/var/home")
+    assert resolve_mount_target(str(tmp_path), "/home") == "/var/home"
+    assert resolve_mount_target(str(tmp_path), "/home/user") == "/var/home/user"
+    assert resolve_mount_target(str(tmp_path), "/home/../tmp") == "/var/tmp"
+    assert resolve_mount_target(str(tmp_path), "/missing/child") == "/missing/child"
+
+
+@pytest.mark.parametrize("target", ["../outside", "/../outside", "home", "/alias"])
+def test_resolve_mount_target_refused(tmp_path, target):
+    """Refuse escaping links and cycles rather than using the installer root."""
+    (tmp_path / "home").symlink_to(target)
+    (tmp_path / "alias").symlink_to("home")
+    with pytest.raises(ValueError, match=r"escapes deployment root|Too many symlinks"):
+        resolve_mount_target(str(tmp_path), "/home")
 
 
 class SetSystemRootTests(unittest.TestCase):

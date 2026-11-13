@@ -20,6 +20,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
 from blivet.devices import StorageDevice
 from blivet.devicetree import DeviceTree
 from blivet.formats import get_format
@@ -41,6 +42,28 @@ class FSSetTestCase(unittest.TestCase):
     def _add_device(self, device):
         """Add a device to the device tree."""
         self.devicetree._add_device(device)
+
+    def test_canonical_fstab_mount_target(self):
+        """Only deployment fstab generation follows mount aliases."""
+        root = StorageDevice("root", fmt=get_format("ext4", mountpoint="/"))
+        home = StorageDevice("home", fmt=get_format("ext4", mountpoint="/home"))
+        self._add_device(root)
+        self._add_device(home)
+        with tempfile.TemporaryDirectory() as deployment:
+            os.symlink("var/home", deployment + "/home")
+            assert [e.file for e in self.fsset.fstab()] == ["/", "/home"]
+            fstab = self.fsset.fstab(mount_target_root=deployment)
+            assert [e.file for e in fstab] == ["/", "/var/home"]
+            # Do not change Blivet's already-mounted physical-root paths.
+            assert home.format.mountpoint == "/home"
+            fstab.write(dest_file=deployment + "/fstab")
+            with open(deployment + "/fstab") as stream:
+                assert "/var/home" in stream.read()
+
+            os.unlink(deployment + "/home")
+            os.symlink("../outside", deployment + "/home")
+            with pytest.raises(ValueError, match="escapes deployment root"):
+                self.fsset.fstab(mount_target_root=deployment)
 
     def _get_mount_points(self, devices):
         """Get mount points of the given devices."""
