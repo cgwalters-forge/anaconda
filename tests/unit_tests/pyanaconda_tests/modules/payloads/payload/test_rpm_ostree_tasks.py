@@ -35,6 +35,7 @@ from pyanaconda.modules.payloads.payload.rpm_ostree.installation import (
     CopyBootloaderDataTask,
     DeployOSTreeTask,
     InitOSTreeFsAndRepoTask,
+    PrepareBootcMountTargetsTask,
     PrepareOSTreeMountTargetsTask,
     PullRemoteAndDeleteTask,
     SetSystemRootTask,
@@ -68,6 +69,33 @@ def _make_container_config_data():
     data.transport = "oci"
     data.remote = "remote"
     return data
+
+
+@pytest.mark.parametrize("task_class", [PrepareOSTreeMountTargetsTask, PrepareBootcMountTargetsTask])
+@pytest.mark.parametrize("target", ["var/home", "/var/home", "alias"])
+def test_deployment_mount_alias(tmp_path, task_class, target):
+    """Bind the physical mount at its canonical deployment destination."""
+    (tmp_path / "home").symlink_to(target)
+    (tmp_path / "alias").symlink_to("/var/home")
+    task = task_class(str(tmp_path), "/physroot", _make_config_data())
+    with patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.safe_exec_program") as run:
+        task._handle_other_mount_points({"/home": "device"})
+        run.assert_called_once_with(
+            "mount", ["--bind", "/physroot/home", str(tmp_path / "var/home")]
+        )
+    assert task._internal_mounts == [str(tmp_path / "var/home")]
+
+
+@pytest.mark.parametrize("task_class", [PrepareOSTreeMountTargetsTask, PrepareBootcMountTargetsTask])
+def test_deployment_mount_escape(tmp_path, task_class):
+    """Reject escaping deployment links before mounting or making directories."""
+    (tmp_path / "home").symlink_to("../outside")
+    task = task_class(str(tmp_path), "/physroot", _make_config_data())
+    with patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.safe_exec_program") as run:
+        with pytest.raises(ValueError, match="escapes deployment root"):
+            task._handle_other_mount_points({"/home": "device"})
+        run.assert_not_called()
+    assert not task._internal_mounts
 
 
 class PrepareOSTreeMountTargetsTaskTestCase(unittest.TestCase):
