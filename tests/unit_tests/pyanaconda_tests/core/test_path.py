@@ -28,6 +28,7 @@ from pyanaconda.core.path import (
     join_paths,
     make_directories,
     open_with_perm,
+    resolve_path_in_root,
     set_mode,
     set_system_root,
     touch,
@@ -331,3 +332,65 @@ class MiscTests(unittest.TestCase):
             assert result
             with open(os.path.join(target_folder, "file.txt"), "r") as f:
                 assert f.read() == "new content"
+
+
+class ResolvePathInRootTests(unittest.TestCase):
+    """Test resolve_path_in_root"""
+
+    # Symlinks of an OSTree-like deployment and their targets.
+    LINKS = {
+        "home": "var/home",
+        "root": "var/roothome",
+        "usr/local": "../var/usrlocal",
+        "srv": "/var/srv",
+        "chain": "home",
+        "loop": "loop",
+        "escape": "../outside",
+        "escape-deep": "var/../../outside",
+        "escape-absolute": "/../outside",
+    }
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        make_directories(os.path.join(self.root, "var/home"))
+        make_directories(os.path.join(self.root, "usr"))
+
+        for link, target in self.LINKS.items():
+            os.symlink(target, os.path.join(self.root, link))
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def test_resolve(self):
+        """Test resolving paths inside the root."""
+        cases = [
+            ("/", "/"),
+            ("/boot", "/boot"),
+            ("/var/home", "/var/home"),
+            ("/home", "/var/home"),
+            ("/home/user", "/var/home/user"),
+            ("/root", "/var/roothome"),
+            ("/usr/local", "/var/usrlocal"),
+            # An absolute target is resolved inside the root.
+            ("/srv", "/var/srv"),
+            ("/chain", "/var/home"),
+            ("/data/../home", "/var/home"),
+            ("/missing/dir", "/missing/dir"),
+        ]
+
+        for path, expected in cases:
+            assert resolve_path_in_root(self.root, path) == expected, path
+
+    def test_resolve_errors(self):
+        """Test refusing paths that leave the root."""
+        cases = [
+            ("/escape", "escapes the root"),
+            ("/escape-deep", "escapes the root"),
+            ("/escape-absolute", "escapes the root"),
+            ("/..", "escapes the root"),
+            ("/loop", "Too many levels"),
+        ]
+
+        for path, message in cases:
+            with pytest.raises(ValueError, match=message):
+                resolve_path_in_root(self.root, path)

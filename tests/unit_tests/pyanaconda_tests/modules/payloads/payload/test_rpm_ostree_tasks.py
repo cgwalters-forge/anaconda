@@ -155,6 +155,34 @@ class PrepareOSTreeMountTargetsTaskTestCase(unittest.TestCase):
         exists_mock.return_value = True
 
     @patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.execProgram")
+    def test_setup_internal_bindmount_symlinks(self, exec_mock):
+        """Test OSTree mount target prepare task _setup_internal_bindmount with symlinks"""
+        exec_mock.return_value = [0, ""]
+        data = _make_config_data()
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            os.makedirs(os.path.join(sysroot, "var/home"))
+            os.symlink("var/home", os.path.join(sysroot, "home"))
+            os.symlink("/var/home", os.path.join(sysroot, "absolute"))
+            os.symlink("../outside", os.path.join(sysroot, "escape"))
+
+            task = PrepareOSTreeMountTargetsTask(sysroot, "/physroot", data)
+
+            # mount at the canonical path inside the deployment
+            for dest in ("/home", "/absolute"):
+                task._setup_internal_bindmount(dest, recurse=False)
+                exec_mock.assert_called_once_with(
+                    "mount", ["--bind", "/physroot" + dest, sysroot + "/var/home"]
+                )
+                exec_mock.reset_mock()
+
+            # refuse a symlink that escapes the deployment
+            with pytest.raises(PayloadInstallationError, match="escapes the root"):
+                task._setup_internal_bindmount("/escape", recurse=False)
+
+            exec_mock.assert_not_called()
+
+    @patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.execProgram")
     @patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.make_directories")
     @patch("pyanaconda.modules.payloads.payload.rpm_ostree.installation.STORAGE")
     @patch("os.path.exists", returns=True)
