@@ -27,7 +27,11 @@ from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.glib import GError, Variant, create_new_context, format_size_full
 from pyanaconda.core.i18n import _
-from pyanaconda.core.path import make_directories, set_system_root
+from pyanaconda.core.path import (
+    make_directories,
+    resolve_path_in_root,
+    set_system_root,
+)
 from pyanaconda.core.util import execProgram, execReadlines, execWithRedirect
 from pyanaconda.modules.common.constants.objects import BOOTLOADER, DEVICE_TREE
 from pyanaconda.modules.common.constants.services import LOCALIZATION, STORAGE
@@ -174,12 +178,13 @@ class PrepareMountTargetsTaskBase(Task):  # pylint: disable=abstract-method
         else:
             src = self._sysroot + src
 
-        # Canonicalize dest to the full path
-        dest = self._sysroot + dest
-        # Resolve symlinks as bind mounting over symlinks does not
-        # seem to work on btrfs:
+        # Resolve symlinks inside the deployment as bind mounting over
+        # symlinks does not seem to work on btrfs:
         # https://bugzilla.redhat.com/show_bug.cgi?id=2262892
-        dest = os.path.realpath(dest)
+        try:
+            dest = self._sysroot + resolve_path_in_root(self._sysroot, dest)
+        except ValueError as e:
+            raise PayloadInstallationError(str(e)) from None
 
         if bind_ro:
             safe_exec_program("mount", ["--bind", src, src])

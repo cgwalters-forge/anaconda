@@ -120,6 +120,57 @@ def join_paths(path, *paths):
     return os.path.join(path, *new_paths)
 
 
+# The same limit as the Linux kernel's MAXSYMLINKS.
+MAX_SYMLINKS = 40
+
+
+def resolve_path_in_root(root, path):
+    """Resolve symlinks in a path as seen from inside the given root.
+
+    Unlike os.path.realpath(), this never looks at the installer's own file
+    system: an absolute link target is resolved against the root, as it would
+    be in the booted system. Components that don't exist are kept as they are.
+
+    :param str root: a path to the root, for example the OSTree deployment
+    :param str path: an absolute path inside the root, for example /home
+    :return str: the canonical absolute path inside the root, for example /var/home
+    :raise ValueError: if a link climbs out of the root or links nest too deeply
+    """
+    pending = [c for c in reversed(path.split(os.path.sep)) if c]
+    resolved = []
+    links = 0
+
+    while pending:
+        component = pending.pop()
+
+        if component == ".":
+            continue
+
+        if component == "..":
+            if not resolved:
+                raise ValueError("The path {} escapes the root {}.".format(path, root))
+            resolved.pop()
+            continue
+
+        candidate = os.path.join(root, *resolved, component)
+
+        if not os.path.islink(candidate):
+            resolved.append(component)
+            continue
+
+        links += 1
+        if links > MAX_SYMLINKS:
+            raise ValueError("Too many levels of symbolic links in {}.".format(path))
+
+        target = os.readlink(candidate)
+        if target.startswith(os.path.sep):
+            resolved = []
+
+        pending.extend(c for c in reversed(target.split(os.path.sep)) if c)
+
+    return os.path.sep + os.path.sep.join(resolved)
+
+
 def touch(file_path):
     """Create an empty file.
 

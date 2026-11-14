@@ -22,7 +22,7 @@ from pyanaconda.core.constants import PAYLOAD_TYPE_DNF
 from pyanaconda.core.i18n import _
 from pyanaconda.core.path import join_paths
 from pyanaconda.core.product import get_product_name
-from pyanaconda.modules.common.constants.services import PAYLOADS
+from pyanaconda.modules.common.util import get_active_payload_type
 from pyanaconda.modules.storage.bootloader.base import BootLoader, BootLoaderError
 
 log = get_module_logger(__name__)
@@ -90,14 +90,7 @@ class SystemdBoot(BootLoader):
     @staticmethod
     def _get_payload_type():
         """Get the type of the active payload."""
-        payloads_proxy = PAYLOADS.get_proxy()
-        object_path = payloads_proxy.ActivePayload
-
-        if not object_path:
-            return None
-
-        object_proxy = PAYLOADS.get_proxy(object_path)
-        return object_proxy.Type
+        return get_active_payload_type()
 
     def write_config(self):
         log.info("systemd.py: write_config systemd start")

@@ -17,7 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from pyanaconda.modules.common.constants.services import BOSS
+from pyanaconda.modules.common.constants.services import BOSS, PAYLOADS
 
 
 def is_module_available(module_service_identifier):
@@ -30,3 +30,18 @@ def is_module_available(module_service_identifier):
     """
     boss_proxy = BOSS.get_proxy()
     return module_service_identifier.service_name in boss_proxy.GetModules()
+
+
+def get_active_payload_type():
+    """Get the type of the active payload.
+
+    :return: a string with the payload type or None
+    """
+    payloads_proxy = PAYLOADS.get_proxy()
+    object_path = payloads_proxy.ActivePayload
+
+    if not object_path:
+        return None
+
+    object_proxy = PAYLOADS.get_proxy(object_path)
+    return object_proxy.Type

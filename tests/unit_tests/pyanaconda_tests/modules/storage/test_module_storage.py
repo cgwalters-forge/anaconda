@@ -24,7 +24,16 @@ import unittest
 from unittest.mock import Mock, PropertyMock, patch
 
 import pytest
+from blivet.devicelibs.gpt import (
+    GPT_VOL_HOME,
+    GPT_VOL_LINUX_GENERIC,
+    GPT_VOL_SRV,
+    GPT_VOL_VAR,
+    gpt_part_uuid_for_volume,
+)
 from blivet.devices import StorageDevice
+from blivet.devicetree import DeviceTree
+from blivet.formats import get_format
 from blivet.formats.fs import BTRFS
 from dasbus.server.container import DBusContainerError
 from dasbus.typing import *  # pylint: disable=wildcard-import
@@ -41,6 +50,7 @@ from pyanaconda.core.constants import (
 )
 from pyanaconda.modules.common.constants.services import STORAGE
 from pyanaconda.modules.common.containers import PartitioningContainer
+from pyanaconda.modules.common.errors.installation import StorageInstallationError
 from pyanaconda.modules.common.errors.storage import InvalidStorageError
 from pyanaconda.modules.common.task import TaskInterface
 from pyanaconda.modules.storage.bootloader import BootLoaderFactory
@@ -49,6 +59,7 @@ from pyanaconda.modules.storage.bootloader.grub2 import GRUB2, IPSeriesGRUB2
 from pyanaconda.modules.storage.bootloader.zipl import ZIPL
 from pyanaconda.modules.storage.checker.utils import StorageCheckerReport
 from pyanaconda.modules.storage.devicetree import create_storage
+from pyanaconda.modules.storage.devicetree.fsset import FSSet
 from pyanaconda.modules.storage.initialization import enable_installer_mode
 from pyanaconda.modules.storage.installation import (
     CreateStorageLayoutTask,
@@ -371,8 +382,10 @@ class StorageInterfaceTestCase(unittest.TestCase):
             }
         ]
 
+    @patch("pyanaconda.modules.storage.storage.get_active_payload_type",
+           return_value=PAYLOAD_TYPE_RPM_OSTREE)
     @patch_dbus_publish_object
-    def test_install_with_tasks(self, publisher):
+    def test_install_with_tasks(self, publisher, payload_type):
         """Test InstallWithTask."""
         task_classes = [
             CreateStorageLayoutTask,
@@ -392,6 +405,10 @@ class StorageInterfaceTestCase(unittest.TestCase):
             assert object_path == task_paths[i]
             assert isinstance(obj, TaskInterface)
             assert isinstance(obj.implementation, task_classes[i])
+
+        # The storage layout task gets the active payload type.
+        obj = publisher.call_args_list[0][0][1]
+        assert obj.implementation._payload_type == PAYLOAD_TYPE_RPM_OSTREE
 
     @patch_dbus_publish_object
     def test_write_configuration_with_task(self, publisher):
@@ -1665,6 +1682,36 @@ class StorageTasksTestCase(unittest.TestCase):
         CreateStorageLayoutTask(storage).run()
         storage.assert_not_called()
 
+    def test_adjust_partition_types_for_rpm_ostree(self):
+        """Test partition types of symlinked mount points for OSTree installations."""
+        home = gpt_part_uuid_for_volume(GPT_VOL_HOME)
+        srv = gpt_part_uuid_for_volume(GPT_VOL_SRV)
+        var = gpt_part_uuid_for_volume(GPT_VOL_VAR)
+        generic = gpt_part_uuid_for_volume(GPT_VOL_LINUX_GENERIC)
+
+        # payload type, exists, requested type, discoverable type, expected requested type
+        cases = [
+            (PAYLOAD_TYPE_DNF, False, None, home, None),
+            (PAYLOAD_TYPE_RPM_OSTREE, False, None, home, generic),
+            (PAYLOAD_TYPE_RPM_OSTREE, False, None, srv, generic),
+            (PAYLOAD_TYPE_RPM_OSTREE, False, None, var, None),
+            (PAYLOAD_TYPE_RPM_OSTREE, False, None, None, None),
+            (PAYLOAD_TYPE_RPM_OSTREE, True, None, home, None),
+            (PAYLOAD_TYPE_RPM_OSTREE, False, home, home, home),
+        ]
+
+        for payload_type, exists, requested, discoverable, expected in cases:
+            device = Mock(
+                exists=exists,
+                req_part_type_uuid=requested,
+                part_type_uuid_req=discoverable
+            )
+            storage = Mock(partitions=[device])
+
+            task = CreateStorageLayoutTask(storage, payload_type)
+            task._adjust_partition_types_for_rpm_ostree(storage)
+            assert device.req_part_type_uuid == expected
+
     @patch("os.chmod")
     @patch("os.makedirs")
     @patch("blivet.tasks.fsmount.FSMount.do_task")
@@ -1827,6 +1874,43 @@ class StorageTasksTestCase(unittest.TestCase):
         task = WriteConfigurationTask(storage, PAYLOAD_TYPE_RPM_OSTREE)
         task._exclude_root_from_fstab_for_rpm_ostree(storage)
         storage.fsset.exclude_from_fstab.assert_called_once_with("/")
+
+    def _get_fstab_paths(self, payload_type, links, mount_points):
+        """Write the fstab of a deployment and return its mount points."""
+        devicetree = DeviceTree()
+        for i, mount_point in enumerate(mount_points):
+            fmt = get_format("ext4", mountpoint=mount_point)
+            devicetree._add_device(StorageDevice("dev{}".format(i), fmt=fmt))
+
+        storage = Mock(mountpoints=devicetree.mountpoints, fsset=FSSet(devicetree))
+        task = WriteConfigurationTask(storage, payload_type)
+
+        with tempfile.TemporaryDirectory() as sysroot:
+            os.makedirs(os.path.join(sysroot, "var/home"))
+            for link, target in links.items():
+                os.symlink(target, os.path.join(sysroot, link))
+
+            task._exclude_root_from_fstab_for_rpm_ostree(storage)
+            task._canonicalize_fstab_paths_for_rpm_ostree(storage, sysroot)
+
+        return [entry.file for entry in storage.fsset.fstab()]
+
+    def test_canonicalize_fstab_paths_for_rpm_ostree(self):
+        """Test writing canonical mount points into fstab for OSTree installations."""
+        links = {"home": "var/home", "srv": "var/srv"}
+        mount_points = ["/", "/boot", "/home", "/srv", "/var"]
+
+        # DNF payload should not change anything
+        paths = self._get_fstab_paths(PAYLOAD_TYPE_DNF, links, mount_points)
+        assert paths == ["/", "/boot", "/home", "/srv", "/var"]
+
+        # RPM_OSTREE payload should write the paths the symlinks resolve to
+        paths = self._get_fstab_paths(PAYLOAD_TYPE_RPM_OSTREE, links, mount_points)
+        assert paths == ["/boot", "/var", "/var/home", "/var/srv"]
+
+        # A symlink that escapes the deployment should be refused
+        with pytest.raises(StorageInstallationError, match="escapes the root"):
+            self._get_fstab_paths(PAYLOAD_TYPE_RPM_OSTREE, {"data": "../.."}, ["/", "/data"])
 
 
 class StorageValidationTasksTestCase(unittest.TestCase):

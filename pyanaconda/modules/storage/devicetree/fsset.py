@@ -338,6 +338,7 @@ class FSSet:
         self.blkid_tab = None
         self._fstab_swaps = set()
         self._fstab_exclude_mountpoints = set()
+        self._fstab_mountpoint_paths = {}
         self._system_filesystems = []
 
         # unrecognized or ignored entries in fstab (blivet.fstab.FSTabEntry)
@@ -639,7 +640,8 @@ class FSSet:
 """ % time.asctime()
 
         devices = sorted(self.mountpoints.values(),
-                         key=lambda d: d.format.mountpoint)
+                         key=lambda d: self._fstab_mountpoint_paths.get(d.format.mountpoint,
+                                                                        d.format.mountpoint))
 
         devices += self.swap_devices
 
@@ -675,6 +677,10 @@ class FSSet:
                             fstype,
                             device.path)  # legacy warning message # TODO change to e.msg?
                 continue
+
+            if device.format.mountable and \
+                    device.format.mountpoint in self._fstab_mountpoint_paths:
+                new_entry.file = self._fstab_mountpoint_paths[device.format.mountpoint]
 
             for netdev in netdevs:
                 if device.depends_on(netdev):
@@ -718,3 +724,11 @@ class FSSet:
         :type mountpoint: str
         """
         self._fstab_exclude_mountpoints.add(mountpoint)
+
+    def set_fstab_path(self, mountpoint, path):
+        """Write a mountpoint into fstab under a different path.
+
+        :param str mountpoint: the mountpoint of a device (e.g. "/home")
+        :param str path: the path to write into fstab (e.g. "/var/home")
+        """
+        self._fstab_mountpoint_paths[mountpoint] = path

@@ -27,6 +27,11 @@ import parted
 from blivet import arch, blockdev
 from blivet import callbacks as blivet_callbacks
 from blivet import util as blivet_util
+from blivet.devicelibs.gpt import (
+    GPT_VOL_LINUX_GENERIC,
+    gpt_part_uuid_for_mountpoint,
+    gpt_part_uuid_for_volume,
+)
 from blivet.devicelibs.lvm import HAVE_LVMDEVICES
 from blivet.errors import FormatResizeError, FSResizeError, StorageError
 from blivet.util import get_current_entropy
@@ -35,7 +40,7 @@ from pyanaconda.anaconda_loggers import get_module_logger
 from pyanaconda.core.configuration.anaconda import conf
 from pyanaconda.core.constants import PAYLOAD_TYPE_RPM_OSTREE
 from pyanaconda.core.i18n import _
-from pyanaconda.core.path import make_directories
+from pyanaconda.core.path import make_directories, resolve_path_in_root
 from pyanaconda.core.util import execWithRedirect, join_paths
 from pyanaconda.modules.common.constants.objects import FCOE, ISCSI, NVME
 from pyanaconda.modules.common.constants.services import STORAGE
@@ -47,18 +52,32 @@ log = get_module_logger(__name__)
 
 __all__ = ["CreateStorageLayoutTask", "MountFilesystemsTask", "WriteConfigurationTask"]
 
+# Mount points that are symlinks into /var (or /run) in the OSTree layout.
+# See "Adapting existing package-based systems" in the OSTree documentation.
+OSTREE_SYMLINKED_MOUNT_POINTS = (
+    "/home",
+    "/media",
+    "/mnt",
+    "/opt",
+    "/root",
+    "/srv",
+    "/usr/local",
+)
+
 
 class CreateStorageLayoutTask(Task):
     """Installation task for execution of the storage configuration."""
 
-    def __init__(self, storage, entropy_timeout=600):
+    def __init__(self, storage, payload_type=None, entropy_timeout=600):
         """Create a new task.
 
         :param storage: the storage model
+        :param payload_type: a string with the payload type or None
         :param entropy_timeout: a number of seconds for entropy gathering
         """
         super().__init__()
         self._storage = storage
+        self._payload_type = payload_type
         self._entropy_timeout = entropy_timeout
 
     @property
@@ -162,10 +181,43 @@ class CreateStorageLayoutTask(Task):
         :type callbacks: return value of the :func:`blivet.callbacks.create_new_callbacks_register`
         """
         storage.devicetree.teardown_all()
+        self._adjust_partition_types_for_rpm_ostree(storage)
         storage.do_it(callbacks)
         self._setup_bootable_devices(storage)
         storage.dump_state("final")
         storage.turn_on_swap()
+
+    def _adjust_partition_types_for_rpm_ostree(self, storage):
+        """Don't tag new partitions for symlinked mount points as discoverable.
+
+        Blivet gives new GPT partitions the Discoverable Partitions type of
+        their mount point, for example the home type for /home. On OSTree
+        and bootc systems /home and /srv are symlinks into /var, so
+        systemd-gpt-auto-generator would generate a mount unit for the
+        symlink, which systemd refuses, and the boot fails. Use the generic
+        Linux type for them instead. Existing partitions and explicitly
+        requested types are left alone.
+
+        :type storage: an instance of InstallerStorage
+        """
+        if self._payload_type != PAYLOAD_TYPE_RPM_OSTREE:
+            return
+
+        symlinked_types = {
+            gpt_part_uuid_for_mountpoint(path) for path in OSTREE_SYMLINKED_MOUNT_POINTS
+        }
+        symlinked_types.discard(None)
+        generic_type = gpt_part_uuid_for_volume(GPT_VOL_LINUX_GENERIC)
+
+        for device in storage.partitions:
+            if device.exists or device.req_part_type_uuid is not None:
+                continue
+
+            if device.part_type_uuid_req not in symlinked_types:
+                continue
+
+            log.debug("Using the generic Linux partition type for %s.", device.name)
+            device.req_part_type_uuid = generic_type
 
     def _setup_bootable_devices(self, storage):
         """Set up the bootable devices.
@@ -288,6 +340,7 @@ class WriteConfigurationTask(Task):
         self._adjust_luks_options(storage)
         self._adjust_mount_options_for_rpm_ostree(storage, sysroot)
         self._exclude_root_from_fstab_for_rpm_ostree(storage)
+        self._canonicalize_fstab_paths_for_rpm_ostree(storage, sysroot)
 
         storage.fsset.write()
 
@@ -393,6 +446,34 @@ class WriteConfigurationTask(Task):
 
         storage.fsset.exclude_from_fstab("/")
         log.debug("Excluded / from fstab for rpm-ostree payload")
+
+    def _canonicalize_fstab_paths_for_rpm_ostree(self, storage, sysroot):
+        """Write canonical mount points into fstab for OSTree/bootc installations.
+
+        Mount points like /home are symlinks into /var in the deployment,
+        so write the path they resolve to, for example /var/home. The
+        storage configuration is written after the deployment is set as
+        the system root, so symlinks are resolved inside the deployment.
+
+        :type storage: an instance of InstallerStorage
+        :param sysroot: a path to the target OS installation
+        :raise: StorageInstallationError if a mount point escapes the deployment
+        """
+        if self._payload_type != PAYLOAD_TYPE_RPM_OSTREE:
+            return
+
+        for mount_point in storage.mountpoints:
+            if mount_point == "/":
+                continue
+
+            try:
+                path = resolve_path_in_root(sysroot, mount_point)
+            except ValueError as e:
+                raise StorageInstallationError(str(e)) from None
+
+            if path != mount_point:
+                log.debug("Writing %s into fstab as %s.", mount_point, path)
+                storage.fsset.set_fstab_path(mount_point, path)
 
     def _write_escrow_packets(self, storage, sysroot):
         """Write the escrow packets.

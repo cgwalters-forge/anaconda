@@ -28,6 +28,7 @@ from pyanaconda.modules.common.containers import TaskContainer
 from pyanaconda.modules.common.errors.storage import InvalidStorageError
 from pyanaconda.modules.common.structures.requirement import Requirement
 from pyanaconda.modules.common.submodule_manager import SubmoduleManager
+from pyanaconda.modules.common.util import get_active_payload_type
 from pyanaconda.modules.storage.bootloader import BootloaderModule
 from pyanaconda.modules.storage.checker import StorageCheckerModule
 from pyanaconda.modules.storage.dasd import DASDModule
@@ -380,8 +381,10 @@ class StorageService(KickstartService):
         """
         storage = self.storage
 
+        # The payload type isn't an argument of the generic InstallWithTasks
+        # DBus method, so ask the Payloads service for it.
         return [
-            CreateStorageLayoutTask(storage),
+            CreateStorageLayoutTask(storage, get_active_payload_type()),
             MountFilesystemsTask(storage)
         ]
 
